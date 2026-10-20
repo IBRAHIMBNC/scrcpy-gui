@@ -35,6 +35,13 @@ final class ScrcpySession: MirrorSession {
         process.arguments = arguments
         var environment = ProcessInfo.processInfo.environment
         if let adbPath { environment["ADB"] = adbPath }
+        let nextToScrcpy = URL(fileURLWithPath: scrcpyPath).deletingLastPathComponent().appendingPathComponent("scrcpy-server").path
+        let bundledServer = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/scrcpy/scrcpy-server").path
+        if scrcpyPath.hasPrefix(Bundle.main.bundleURL.path), FileManager.default.fileExists(atPath: bundledServer) {
+            environment["SCRCPY_SERVER_PATH"] = bundledServer
+        } else if FileManager.default.fileExists(atPath: nextToScrcpy) {
+            environment["SCRCPY_SERVER_PATH"] = nextToScrcpy
+        }
         process.environment = environment
         process.standardInput = FileHandle.nullDevice
 

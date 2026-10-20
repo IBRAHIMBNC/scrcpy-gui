@@ -86,8 +86,7 @@ final class DeviceManager: ObservableObject {
 
     /// What is wrong with the Android tools, if anything (independent of whether it matters right now).
     var toolProblem: String? {
-        if scrcpyPath == nil { return "scrcpy not found. Expected it at ~/.local/share/scrcpy/scrcpy or in Homebrew." }
-        if adbPath == nil { return "adb not found. Install Android platform-tools or keep adb next to scrcpy." }
+        if scrcpyPath == nil || adbPath == nil { return "Android tools are missing from this copy of the app. Please re-download Device Mirror." }
         return nil
     }
 
@@ -420,7 +419,9 @@ final class DeviceManager: ObservableObject {
             paths.compactMap { $0 }.first { fileManager.isExecutableFile(atPath: $0) }
         }
 
+        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/scrcpy")
         let scrcpy = firstExecutable([
+            bundled.appendingPathComponent("scrcpy").path,
             environment["SCRCPY"],
             "\(home)/.local/share/scrcpy/scrcpy",
             "\(home)/.local/bin/scrcpy",
@@ -433,6 +434,7 @@ final class DeviceManager: ObservableObject {
                 .appendingPathComponent("adb").path
         }
         let adb = firstExecutable([
+            bundled.appendingPathComponent("adb").path,
             environment["ADB"],
             environment["ANDROID_HOME"].map { "\($0)/platform-tools/adb" },
             "\(home)/Library/Android/sdk/platform-tools/adb",
