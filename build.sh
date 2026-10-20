@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Builds "Scrcpy GUI.app" with swiftc (no Xcode project needed).
-#   ./build.sh            -> build/Scrcpy GUI.app
+# Builds "Device Mirror.app" with swiftc (no Xcode project needed).
+#   ./build.sh            -> build/Device Mirror.app
 #   ./build.sh --install  -> also copies it to /Applications
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="Scrcpy GUI"
+APP_NAME="Device Mirror"
 APP="build/$APP_NAME.app"
 ICON_SRC="${ICON_SRC:-Resources/AppIcon.png}"
 INSTALL_DIR="${INSTALL_DIR:-/Applications}"
@@ -15,8 +15,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 xcrun swiftc -O -parse-as-library -swift-version 5 \
   -target arm64-apple-macos14.0 \
+  -framework AVFoundation -framework CoreMediaIO -framework CoreImage \
   Sources/*.swift \
-  -o "$APP/Contents/MacOS/ScrcpyGUI"
+  -o "$APP/Contents/MacOS/DeviceMirror"
 
 cp Info.plist "$APP/Contents/Info.plist"
 

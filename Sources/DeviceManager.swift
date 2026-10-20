@@ -1,17 +1,52 @@
 import AppKit
 import Foundation
 
+enum Platform: String, Hashable {
+    case android
+    case ios
+
+    var label: String { self == .ios ? "iOS" : "Android" }
+}
+
+enum PlatformFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case android = "Android"
+    case ios = "iOS"
+
+    var id: String { rawValue }
+
+    func includes(_ device: Device) -> Bool {
+        switch self {
+        case .all: return true
+        case .android: return device.platform == .android
+        case .ios: return device.platform == .ios
+        }
+    }
+}
+
 struct Device: Identifiable, Hashable {
     let serial: String
     let state: String
     let model: String
+    var platform: Platform = .android
+    var osVersion: String = ""
 
     var id: String { serial }
     var isReady: Bool { state == "device" }
-    var isWireless: Bool { serial.contains(":") || serial.contains("._adb-tls-") }
-    var displayName: String { model.isEmpty ? serial : model.replacingOccurrences(of: "_", with: " ") }
+    var isWireless: Bool {
+        platform == .android && (serial.contains(":") || serial.contains("._adb-tls-"))
+    }
+    var displayName: String {
+        switch platform {
+        case .ios: return model.isEmpty ? "iPhone" : model
+        case .android: return model.isEmpty ? serial : model.replacingOccurrences(of: "_", with: " ")
+        }
+    }
 
     var stateHint: String? {
+        if platform == .ios {
+            return state == "device" ? nil : "Unlock the iPhone and tap Trust."
+        }
         switch state {
         case "device": return nil
         case "unauthorized": return "Unlock the phone and accept the USB debugging prompt."
@@ -28,7 +63,11 @@ final class DeviceManager: ObservableObject {
     static let shared = DeviceManager()
 
     @Published private(set) var devices: [Device] = []
-    @Published private(set) var androidVersions: [String: String] = [:]
+    /// OS versions by device id: Android via `getprop`, iOS via `devicectl` when Xcode is installed.
+    @Published private(set) var osVersions: [String: String] = [:]
+    @Published private(set) var iosModels: [String: String] = [:]
+    /// True once the optional iOS version lookup has run at least once.
+    @Published private(set) var iosInfoAttempted = false
     @Published private(set) var running: Set<String> = []
     @Published private(set) var busy: Set<String> = []
     @Published private(set) var adbUnavailable = false
@@ -38,16 +77,30 @@ final class DeviceManager: ObservableObject {
     let scrcpyPath: String?
     let adbPath: String?
 
-    private var sessions: [String: Process] = [:]
-    private var recordings: [String: URL] = [:]
-    private var stopping: Set<String> = []
+    private var sessions: [String: MirrorSession] = [:]
+    private var androidDevices: [Device] = []
+    private var iosDevices: [Device] = []
+    private let iosDiscovery = IOSDiscovery()
     private var isRefreshing = false
     private var pollTimer: Timer?
 
+    /// What is wrong with the Android tools, if anything (independent of whether it matters right now).
     var toolProblem: String? {
         if scrcpyPath == nil { return "scrcpy not found. Expected it at ~/.local/share/scrcpy/scrcpy or in Homebrew." }
         if adbPath == nil { return "adb not found. Install Android platform-tools or keep adb next to scrcpy." }
         return nil
+    }
+
+    /// The Android tools only matter when an Android device is listed or the Android filter is selected.
+    func androidToolsMatter(filter: PlatformFilter) -> Bool {
+        filter == .android || devices.contains { $0.platform == .android }
+    }
+
+    func canMirror(_ device: Device) -> Bool {
+        switch device.platform {
+        case .android: return device.isReady && scrcpyPath != nil
+        case .ios: return device.isReady
+        }
     }
 
     private init() {
@@ -56,10 +109,14 @@ final class DeviceManager: ObservableObject {
         scrcpyPath = tools.scrcpy
         adbPath = tools.adb
 
-        guard adbPath != nil else { return }
-        Task {
-            await adb(["start-server"], timeout: 30)
-            await refreshNow()
+        iosDiscovery.onChange = { [weak self] in self?.iosChanged() }
+        iosDiscovery.start()
+
+        if adbPath != nil {
+            Task {
+                await adb(["start-server"], timeout: 30)
+                await refreshNow()
+            }
         }
         pollTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
             Task { @MainActor in await DeviceManager.shared.refreshNow() }
@@ -73,6 +130,7 @@ final class DeviceManager: ObservableObject {
     }
 
     func refreshNow() async {
+        iosDiscovery.refresh()
         guard adbPath != nil, !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
@@ -82,17 +140,42 @@ final class DeviceManager: ObservableObject {
         guard result.succeeded else { return }
 
         let parsed = Self.parseDevices(result.output)
-        if parsed != devices { devices = parsed }
+        if parsed != androidDevices {
+            androidDevices = parsed
+            rebuildDevices()
+        }
 
-        for device in parsed where device.isReady && androidVersions[device.serial] == nil {
-            androidVersions[device.serial] = ""
+        for device in parsed where device.isReady && osVersions[device.serial] == nil {
+            osVersions[device.serial] = ""
             Task {
                 let version = await adb(["-s", device.serial, "shell", "getprop", "ro.build.version.release"], timeout: 5)
-                androidVersions[device.serial] = version.succeeded
+                osVersions[device.serial] = version.succeeded
                     ? version.output.trimmingCharacters(in: .whitespacesAndNewlines)
                     : ""
             }
         }
+    }
+
+    private func iosChanged() {
+        iosDevices = iosDiscovery.devices
+        for (udid, info) in iosDiscovery.info {
+            for device in iosDevices where IOSDiscovery.normalize(device.serial) == udid {
+                if !info.version.isEmpty { osVersions[device.serial] = info.version }
+                if !info.model.isEmpty { iosModels[device.serial] = info.model }
+            }
+        }
+        if iosInfoAttempted != iosDiscovery.enrichmentAttempted { iosInfoAttempted = iosDiscovery.enrichmentAttempted }
+        rebuildDevices()
+    }
+
+    /// Merges the Android and iOS lists (Android first) and attaches known OS versions.
+    private func rebuildDevices() {
+        let merged = (androidDevices + iosDevices).map { device -> Device in
+            var copy = device
+            copy.osVersion = osVersions[device.serial] ?? ""
+            return copy
+        }
+        if merged != devices { devices = merged }
     }
 
     func connect(to rawAddress: String) async -> String {
@@ -150,11 +233,15 @@ final class DeviceManager: ObservableObject {
     }
 
     func takeScreenshot(_ device: Device) {
+        if device.platform == .ios {
+            takeIOSScreenshot(device)
+            return
+        }
         Task {
             busy.insert(device.serial)
             defer { busy.remove(device.serial) }
 
-            let url = OutputFile.make(in: .picturesDirectory, name: device.displayName, extension: "png")
+            let url = OutputFile.make(name: device.displayName, extension: "png")
             let result = await adb(["-s", device.serial, "exec-out", "screencap", "-p"], stdoutTo: url, timeout: 20)
             let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
 
@@ -168,13 +255,39 @@ final class DeviceManager: ObservableObject {
         }
     }
 
+    private func takeIOSScreenshot(_ device: Device) {
+        let serial = device.serial
+        let name = device.displayName
+        if let session = sessions[serial] as? IOSMirrorSession {
+            session.takeScreenshot()
+            return
+        }
+        Task {
+            busy.insert(serial)
+            defer { busy.remove(serial) }
+            guard await IOSMirrorSession.authorize() else {
+                report(Self.cameraDeniedMessage, source: name)
+                return
+            }
+            if let url = await IOSTemporaryCapture.screenshot(deviceID: serial, name: name) {
+                appendLog("Screenshot saved to \(url.path)", source: name)
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } else {
+                report("Screenshot failed. Is the iPhone unlocked?", source: name)
+            }
+        }
+    }
+
+    private static let cameraDeniedMessage =
+        "Camera access is needed to see the iPhone screen. Allow it in System Settings > Privacy & Security > Camera."
+
     func restartAdb() {
         Task {
             appendLog("Restarting ADB server…", source: "adb")
             await adb(["kill-server"], timeout: 10)
             let result = await adb(["start-server"], timeout: 30)
             appendLog(result.output, source: "adb")
-            androidVersions = [:]
+            osVersions = osVersions.filter { key, _ in iosDevices.contains { $0.serial == key } }
             await refreshNow()
         }
     }
@@ -182,79 +295,92 @@ final class DeviceManager: ObservableObject {
     // MARK: - Mirroring
 
     func mirror(_ device: Device) {
-        guard let scrcpyPath, sessions[device.serial] == nil else { return }
+        guard sessions[device.serial] == nil, !busy.contains(device.serial) else { return }
+        switch device.platform {
+        case .android: mirrorAndroid(device)
+        case .ios: mirrorIOS(device)
+        }
+    }
+
+    private func mirrorAndroid(_ device: Device) {
+        guard let scrcpyPath else { return }
         let serial = device.serial
         let name = device.displayName
         let (arguments, recording) = MirrorArguments.build(serial: serial, title: name)
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: scrcpyPath)
-        process.arguments = arguments
-        var environment = ProcessInfo.processInfo.environment
-        if let adbPath { environment["ADB"] = adbPath }
-        process.environment = environment
-        process.standardInput = FileHandle.nullDevice
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        pipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else {
-                handle.readabilityHandler = nil
-                return
-            }
-            let text = String(decoding: data, as: UTF8.self)
+        let session = ScrcpySession(
+            scrcpyPath: scrcpyPath,
+            adbPath: adbPath,
+            arguments: arguments,
+            recording: recording
+        ) { text in
             Task { @MainActor in DeviceManager.shared.appendLog(text, source: name) }
         }
-        process.terminationHandler = { finished in
-            let status = finished.terminationStatus
-            let reason = finished.terminationReason
-            Task { @MainActor in
-                DeviceManager.shared.sessionEnded(serial: serial, name: name, status: status, reason: reason)
-            }
-        }
-
+        register(session, serial: serial, name: name)
         do {
-            try process.run()
+            try session.start()
         } catch {
+            unregister(serial)
             report("Couldn't launch scrcpy: \(error.localizedDescription)", source: name)
             return
         }
-
-        sessions[serial] = process
-        running.insert(serial)
-        if let recording { recordings[serial] = recording }
         appendLog("$ scrcpy " + arguments.joined(separator: " "), source: name)
     }
 
+    private func mirrorIOS(_ device: Device) {
+        let serial = device.serial
+        let name = device.displayName
+        Task {
+            busy.insert(serial)
+            defer { busy.remove(serial) }
+            guard await IOSMirrorSession.authorize() else {
+                report(Self.cameraDeniedMessage, source: name)
+                return
+            }
+            guard sessions[serial] == nil else { return }
+            do {
+                let session = try IOSMirrorSession(deviceID: serial, name: name) { text in
+                    DeviceManager.shared.appendLog(text, source: name)
+                }
+                register(session, serial: serial, name: name)
+                session.start()
+                appendLog("Started iOS mirror.", source: name)
+            } catch {
+                report("Couldn't start the iPhone mirror: \(error.localizedDescription)", source: name)
+            }
+        }
+    }
+
+    private func register(_ session: MirrorSession, serial: String, name: String) {
+        session.onEnd = { [weak self] end in
+            self?.sessionEnded(serial: serial, name: name, end: end)
+        }
+        sessions[serial] = session
+        running.insert(serial)
+    }
+
+    private func unregister(_ serial: String) {
+        sessions[serial] = nil
+        running.remove(serial)
+    }
+
     func stop(_ device: Device) {
-        guard let process = sessions[device.serial] else { return }
-        stopping.insert(device.serial)
-        process.terminate()
+        sessions[device.serial]?.stop()
     }
 
     func stopAll() {
-        for (serial, process) in sessions {
-            stopping.insert(serial)
-            process.terminate()
-        }
+        for session in Array(sessions.values) { session.stop() }
     }
 
-    private func sessionEnded(serial: String, name: String, status: Int32, reason: Process.TerminationReason) {
-        sessions[serial] = nil
-        running.remove(serial)
-        let requested = stopping.remove(serial) != nil
-
-        if requested || (reason == .exit && status == 0) {
-            appendLog("Session ended.", source: name)
+    private func sessionEnded(serial: String, name: String, end: SessionEnd) {
+        unregister(serial)
+        if let failure = end.failure {
+            report(failure, source: name)
         } else {
-            report("scrcpy exited with code \(status).", source: name)
+            appendLog("Session ended.", source: name)
         }
-
-        if let recording = recordings.removeValue(forKey: serial),
-           FileManager.default.fileExists(atPath: recording.path) {
-            NSWorkspace.shared.activateFileViewerSelecting([recording])
+        if let url = end.revealURL, FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([url])
         }
     }
 

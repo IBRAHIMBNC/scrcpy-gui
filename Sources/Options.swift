@@ -67,7 +67,7 @@ enum MirrorArguments {
 
         var recording: URL?
         if defaults.bool(forKey: OptionKey.record) {
-            let url = OutputFile.make(in: .moviesDirectory, name: title, extension: "mp4")
+            let url = OutputFile.make(name: title, extension: "mp4")
             args += ["--record", url.path]
             recording = url
         }
@@ -76,14 +76,15 @@ enum MirrorArguments {
 }
 
 enum OutputFile {
-    /// A timestamped file in `~/Movies/scrcpy` or `~/Pictures/scrcpy`. Those folders aren't privacy-protected,
-    /// so writing there never triggers a macOS permission prompt (unlike Desktop or Documents).
-    static func make(in directory: FileManager.SearchPathDirectory, name: String, extension ext: String) -> URL {
+    /// The single place that decides where every screenshot and recording is saved: the user's Desktop.
+    static var directory: URL {
         let fileManager = FileManager.default
-        let base = (fileManager.urls(for: directory, in: .userDomainMask).first ?? fileManager.homeDirectoryForCurrentUser)
-            .appendingPathComponent("scrcpy", isDirectory: true)
-        try? fileManager.createDirectory(at: base, withIntermediateDirectories: true)
+        return fileManager.urls(for: .desktopDirectory, in: .userDomainMask).first ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent("Desktop", isDirectory: true)
+    }
 
+    /// A timestamped file directly on the Desktop.
+    static func make(name: String, extension ext: String) -> URL {
+        let base = directory
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
         let safeName = name.components(separatedBy: CharacterSet(charactersIn: "/:")).joined(separator: "-")

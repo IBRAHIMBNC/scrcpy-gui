@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Renders Resources/AppIcon.png (1024x1024) for Scrcpy GUI. Requires Pillow."""
+"""Renders Resources/AppIcon.png (1024x1024) for Device Mirror. Requires Pillow."""
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter

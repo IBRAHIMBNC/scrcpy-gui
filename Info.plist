@@ -5,15 +5,15 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>ScrcpyGUI</string>
+    <string>DeviceMirror</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>local.scrcpy-gui</string>
+    <string>local.devicemirror</string>
     <key>CFBundleName</key>
-    <string>Scrcpy GUI</string>
+    <string>Device Mirror</string>
     <key>CFBundleDisplayName</key>
-    <string>Scrcpy GUI</string>
+    <string>Device Mirror</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -24,6 +24,10 @@
     <string>public.app-category.developer-tools</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Device Mirror needs camera access to show your iPhone screen, which macOS exposes as a capture device.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Device Mirror needs microphone access to play your iPhone's audio, which macOS exposes as a capture device.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

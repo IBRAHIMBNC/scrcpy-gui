@@ -4,25 +4,34 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var manager: DeviceManager
     @AppStorage("showOptions") private var showOptions = true
+    @AppStorage("platformFilter") private var filter = PlatformFilter.all
+
+    private var visibleDevices: [Device] { manager.devices.filter { filter.includes($0) } }
 
     var body: some View {
         VStack(spacing: 0) {
             if let problem = manager.toolProblem {
-                Banner(text: problem, systemImage: "exclamationmark.triangle.fill")
-            } else if manager.adbUnavailable {
+                if manager.androidToolsMatter(filter: filter) {
+                    Banner(text: problem, systemImage: "exclamationmark.triangle.fill")
+                } else {
+                    Banner(text: problem + " Only needed for Android.", systemImage: "info.circle", gray: true)
+                }
+            } else if manager.adbUnavailable, filter != .ios {
                 Banner(text: "ADB isn't responding. Try Restart ADB Server from the toolbar menu.",
                        systemImage: "bolt.horizontal.circle")
             }
             deviceList
-            Divider()
-            ConnectBar()
+            if filter != .ios {
+                Divider()
+                ConnectBar()
+            }
             if manager.showLog {
                 Divider()
                 LogView()
             }
         }
-        .navigationTitle("Scrcpy GUI")
-        .navigationSubtitle(manager.devices.count == 1 ? "1 device" : "\(manager.devices.count) devices")
+        .navigationTitle("Device Mirror")
+        .navigationSubtitle(visibleDevices.count == 1 ? "1 device" : "\(visibleDevices.count) devices")
         .toolbar { toolbar }
         .inspector(isPresented: $showOptions) {
             OptionsView()
@@ -32,15 +41,15 @@ struct ContentView: View {
 
     @ViewBuilder
     private var deviceList: some View {
-        if manager.devices.isEmpty {
+        if visibleDevices.isEmpty {
             ContentUnavailableView {
                 Label("No Devices", systemImage: "smartphone")
             } description: {
-                Text("Plug in an Android device with USB debugging turned on, or connect one over Wi-Fi below.")
+                Text("Android: plug in a device with USB debugging turned on, or connect one over Wi-Fi below. iPhone: connect an iPhone via USB, unlock it and tap Trust.")
             }
             .frame(maxHeight: .infinity)
         } else {
-            List(manager.devices) { device in
+            List(visibleDevices) { device in
                 DeviceRow(device: device)
             }
             .listStyle(.inset)
@@ -49,6 +58,13 @@ struct ContentView: View {
 
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
+        ToolbarItem {
+            Picker("Platform", selection: $filter) {
+                ForEach(PlatformFilter.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .help("Show All, Android or iOS devices")
+        }
         ToolbarItemGroup {
             Button { manager.refresh() } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
@@ -66,7 +82,7 @@ struct ContentView: View {
             Toggle(isOn: $manager.showLog) {
                 Label("Log", systemImage: "text.alignleft")
             }
-            .help("Show scrcpy and adb output")
+            .help("Show scrcpy, adb and mirror output")
 
             Button { showOptions.toggle() } label: {
                 Label("Options", systemImage: "sidebar.trailing")
@@ -92,6 +108,7 @@ private struct DeviceRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(device.displayName).font(.headline)
+                    PlatformBadge(platform: device.platform)
                     if isRunning { MirroringBadge() }
                 }
                 Text(details)
@@ -100,6 +117,8 @@ private struct DeviceRow: View {
                     .textSelection(.enabled)
                 if let hint = device.stateHint {
                     Text(hint).font(.caption).foregroundStyle(.orange)
+                } else if device.platform == .ios, device.osVersion.isEmpty, manager.iosInfoAttempted {
+                    Text("Install Xcode for iOS version info.").font(.caption).foregroundStyle(.secondary)
                 }
             }
 
@@ -113,7 +132,7 @@ private struct DeviceRow: View {
             .labelStyle(.iconOnly)
             .controlSize(.large)
             .disabled(!device.isReady || isBusy)
-            .help("Take screenshot (saved to ~/Pictures/scrcpy)")
+            .help("Take screenshot (saved to Desktop)")
 
             if isRunning {
                 Button("Stop") { manager.stop(device) }
@@ -122,7 +141,7 @@ private struct DeviceRow: View {
                 Button("Mirror") { manager.mirror(device) }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
-                    .disabled(!device.isReady || manager.scrcpyPath == nil)
+                    .disabled(!manager.canMirror(device))
             }
 
             Menu { actions } label: {
@@ -138,7 +157,7 @@ private struct DeviceRow: View {
     }
 
     private var deviceIcon: some View {
-        Image(systemName: "smartphone")
+        Image(systemName: device.platform == .ios ? "iphone" : "smartphone")
             .font(.system(size: 26, weight: .light))
             .foregroundStyle(device.isReady ? Color.primary : Color.secondary)
             .frame(width: 34, height: 40)
@@ -153,8 +172,9 @@ private struct DeviceRow: View {
 
     private var details: String {
         var parts = [device.serial]
-        if let version = manager.androidVersions[device.serial], !version.isEmpty {
-            parts.append("Android \(version)")
+        if device.platform == .ios, let model = manager.iosModels[device.serial] { parts.append(model) }
+        if let version = manager.osVersions[device.serial], !version.isEmpty {
+            parts.append("\(device.platform.label) \(version)")
         }
         parts.append(device.isWireless ? "Wi-Fi" : "USB")
         return parts.joined(separator: " · ")
@@ -164,17 +184,38 @@ private struct DeviceRow: View {
     private var actions: some View {
         Button("Take Screenshot") { manager.takeScreenshot(device) }
             .disabled(!device.isReady)
-        if device.isWireless {
-            Button("Disconnect") { manager.disconnect(device) }
+        if device.platform == .android {
+            if device.isWireless {
+                Button("Disconnect") { manager.disconnect(device) }
+            } else {
+                Button("Enable Wi-Fi Debugging") { manager.enableWireless(device) }
+                    .disabled(!device.isReady || isRunning)
+            }
+            Divider()
+            Button("Copy Serial") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(device.serial, forType: .string)
+            }
         } else {
-            Button("Enable Wi-Fi Debugging") { manager.enableWireless(device) }
-                .disabled(!device.isReady || isRunning)
+            Divider()
+            Button("Copy UDID") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(device.serial, forType: .string)
+            }
         }
-        Divider()
-        Button("Copy Serial") {
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(device.serial, forType: .string)
-        }
+    }
+}
+
+private struct PlatformBadge: View {
+    let platform: Platform
+
+    var body: some View {
+        Text(platform.label)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.secondary.opacity(0.15), in: Capsule())
     }
 }
 
@@ -192,6 +233,7 @@ private struct MirroringBadge: View {
 private struct Banner: View {
     let text: String
     let systemImage: String
+    var gray = false
 
     var body: some View {
         Label(text, systemImage: systemImage)
@@ -199,7 +241,7 @@ private struct Banner: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            .background(Color.orange.opacity(0.15))
+            .background((gray ? Color.secondary : Color.orange).opacity(0.15))
     }
 }
 
@@ -317,12 +359,18 @@ private struct OptionsView: View {
                 }
             }
 
-            Section("Device") {
+            Section {
                 Toggle("Forward audio", isOn: $audio)
                 Toggle("Control with mouse & keyboard", isOn: $control)
                 Toggle("Turn device screen off", isOn: $turnScreenOff).disabled(!control)
                 Toggle("Keep device awake", isOn: $stayAwake).disabled(!control)
                 Toggle("Show touches", isOn: $showTouches).disabled(!control)
+            } header: {
+                Text("Device")
+            } footer: {
+                Text("Bit rate, FPS, control and screen-off apply to Android only.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Window") {
@@ -334,7 +382,7 @@ private struct OptionsView: View {
             Section {
                 Toggle("Record session", isOn: $record)
             } footer: {
-                Text("Recordings go to ~/Movies/scrcpy and screenshots to ~/Pictures/scrcpy. Changes apply to the next session.")
+                Text("Recordings and screenshots are saved to your Desktop. Changes apply to the next session.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
